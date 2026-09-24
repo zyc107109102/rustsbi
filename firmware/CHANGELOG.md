@@ -8,6 +8,10 @@ All notable changes to this project will be documented in this file. See [conven
 
 ### Added
 
+- Answer SBI v0.1 legacy calls from the runtime ecall path. Forward legacy console_putchar
+  to DBCN `console_write_byte` and legacy shutdown to an SRST system reset, answer the
+  remaining legacy EIDs with their legacy error codes, and write only `a0` in legacy replies,
+  as the v0.1 convention requires.
 - Recognize the K3 AP SoC capability on RV64 from an enabled `spacemit,k3` device-tree root.
   Document the compatible and all K3 cores' RV64 architecture with pinned source and datasheet references.
 - Group V821 vendor SBI extensions under `sbi::vendor::allwinner::v821` and

@@ -9,6 +9,7 @@ use core::arch::asm;
 
 use riscv::register::{mepc, mstatus, satp, sstatus};
 use rustsbi::SbiRet;
+use rustsbi::spec;
 
 use super::Error;
 use super::frame::TrapFrame;
@@ -96,6 +97,21 @@ fn fatal() -> ! {
     }
 }
 
+/// The result of one SBI ecall, in either calling convention.
+enum EcallAnswer {
+    /// SBI v0.1 legacy: only a0 (error code) is written back.
+    Legacy(usize),
+    /// Standard SBI: error into a0, value into a1.
+    Standard(SbiRet),
+}
+
+/// Converts a standard error code into the SBI v0.1 legacy code, which uses
+/// positive integers: `0` for success and the negation of the standard code
+/// otherwise.
+fn legacy_error_code(error: usize) -> usize {
+    error.wrapping_neg()
+}
+
 /// The SBI ecall path: extract the standard registers, call the original
 /// `RustSBI` policy, commit `SbiRet`, and advance `mepc` by exactly 4.
 fn sbi_ecall(frame: &mut TrapFrame) {
@@ -110,9 +126,48 @@ fn sbi_ecall(frame: &mut TrapFrame) {
         frame.read_x(15),
     ];
 
-    let ret: SbiRet = init::policy().handle_ecall(extension, function, param);
-    frame.write_x(10, ret.error);
-    frame.write_x(11, ret.value);
+    // Legacy extensions (SBI v0.1, EIDs 0x00..=0x08) return only an error
+    // code in a0 and must preserve every other register. Firmware keeping
+    // that convention matters in practice: the Hermit kernel reuses a1
+    // across legacy console_putchar calls, so writing an SbiRet value into
+    // a1 corrupts its print loop. Forward the two legacy calls with a
+    // standard successor to their DBCN and SRST equivalents, and answer the
+    // remaining legacy calls with their legacy error code.
+    let answer = if extension <= spec::legacy::LEGACY_SHUTDOWN {
+        let ret = match extension {
+            spec::legacy::LEGACY_CONSOLE_PUTCHAR => init::policy().handle_ecall(
+                spec::dbcn::EID_DBCN,
+                spec::dbcn::CONSOLE_WRITE_BYTE,
+                [param[0], 0, 0, 0, 0, 0],
+            ),
+            // A successful legacy shutdown never returns; the SRST handler
+            // resets or powers the machine off.
+            spec::legacy::LEGACY_SHUTDOWN => init::policy().handle_ecall(
+                spec::srst::EID_SRST,
+                spec::srst::SYSTEM_RESET,
+                [
+                    spec::srst::RESET_TYPE_SHUTDOWN as usize,
+                    spec::srst::RESET_REASON_NO_REASON as usize,
+                    0,
+                    0,
+                    0,
+                    0,
+                ],
+            ),
+            _ => SbiRet::not_supported(),
+        };
+        EcallAnswer::Legacy(legacy_error_code(ret.error))
+    } else {
+        EcallAnswer::Standard(init::policy().handle_ecall(extension, function, param))
+    };
+
+    match answer {
+        EcallAnswer::Legacy(error) => frame.write_x(10, error),
+        EcallAnswer::Standard(ret) => {
+            frame.write_x(10, ret.error);
+            frame.write_x(11, ret.value);
+        }
+    }
 
     // SAFETY: M-mode advance of this hart's mepc past the ecall; the ECALL
     // instruction is exactly 4 bytes.

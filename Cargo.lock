@@ -595,6 +595,7 @@ dependencies = [
  "riscv",
  "riscv-decode",
  "rustsbi",
+ "sbi-spec",
  "spin",
 ]
 
